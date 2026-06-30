@@ -1,0 +1,16 @@
+# Deno
+deno.lock
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build
+dist/
+out/
+
+# Node (only relevant if anyone bridges via npm)
+node_modules/

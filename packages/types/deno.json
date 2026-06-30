@@ -1,0 +1,10 @@
+{
+  "name": "@w6w/registry-types",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Logical types + DataStore contract for the w6w App Registry. Dependency-free.",
+  "exports": "./mod.ts",
+  "imports": {
+    "@w6w/types": "../../../core/packages/types/mod.ts"
+  }
+}

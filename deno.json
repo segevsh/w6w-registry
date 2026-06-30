@@ -1,0 +1,29 @@
+{
+  "workspace": [
+    "./packages/types",
+    "./packages/registry"
+  ],
+  "imports": {
+    "@w6w/types": "../core/packages/types/mod.ts",
+    "@w6w/runtime": "../core/packages/runtime/mod.ts",
+    "@w6w/sources": "../core/packages/sources/mod.ts",
+    "@w6w/registry-types": "./packages/types/mod.ts",
+    "@std/assert": "jsr:@std/assert@^1.0.0"
+  },
+  "tasks": {
+    "test": "deno test -A --unstable-worker-options packages/",
+    "check": "deno check packages/",
+    "fmt": "deno fmt packages/",
+    "lint": "deno lint packages/"
+  },
+  "fmt": {
+    "lineWidth": 100,
+    "semiColons": true,
+    "singleQuote": false
+  },
+  "lint": {
+    "rules": {
+      "tags": ["recommended"]
+    }
+  }
+}

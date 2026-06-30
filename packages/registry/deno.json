@@ -1,0 +1,14 @@
+{
+  "name": "@w6w/registry",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Host-side App Registry orchestrator for the w6w platform. Datastore-pluggable; transport-free.",
+  "exports": "./mod.ts",
+  "imports": {
+    "@w6w/types": "../../../core/packages/types/mod.ts",
+    "@w6w/runtime": "../../../core/packages/runtime/mod.ts",
+    "@w6w/sources": "../../../core/packages/sources/mod.ts",
+    "@w6w/registry-types": "../types/mod.ts",
+    "@std/assert": "jsr:@std/assert@^1.0.0"
+  }
+}
