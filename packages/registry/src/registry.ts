@@ -3,7 +3,8 @@
  * and the lifecycle ops. Storage and source resolution are injected so this
  * module stays transport-free, storage-free, and easy to test.
  */
-import type { AppManifest, Maturity, Visibility } from "@w6w/types";
+import { resolve as resolvePath } from "jsr:@std/path@^1.0.0";
+import type { AppManifest, Maturity, PackAppEntry, PackManifest, Visibility } from "@w6w/types";
 import { describe, loadApp, type LoadedApp } from "@w6w/runtime";
 import { resolve as resolveSourceDefault } from "@w6w/sources";
 import {
@@ -19,6 +20,7 @@ import {
   RegistryError,
 } from "@w6w/registry-types";
 import { digestDescription } from "./digest.ts";
+import { isPackDir, readPackManifest } from "./pack.ts";
 import { type BumpKind, bumpSemver, semverGt } from "./semver.ts";
 
 export interface CreateRegistryOptions {
@@ -93,8 +95,40 @@ export interface RefreshResult extends RegisterResult {
   sourceVersion: string;
 }
 
+/**
+ * Per-entry outcome inside a Pack install. Failures never halt the pack:
+ * every entry is attempted, and the aggregate result tells the caller which
+ * ones landed and which didn't.
+ */
+export type PackEntryResult =
+  | { path: string; ok: true; result: RegisterResult }
+  | { path: string; ok: false; error: { code: string; message: string }; optional?: boolean };
+
+export interface PackRegisterResult {
+  /** The pack manifest, as read from `w6w-pack.json`. */
+  pack: PackManifest;
+  /** One entry per pack app, in manifest order. */
+  results: PackEntryResult[];
+  /** Count of entries that successfully registered a new version (or were idempotent no-ops). */
+  registered: number;
+  /** Count of entries that failed. Optional-flagged failures still count here. */
+  failed: number;
+}
+
 export interface Registry {
   register(sourceRef: string): Promise<RegisterResult>;
+  /**
+   * Install a Pack — a `w6w-pack.json` at the resolved sourceRef declares one
+   * or more App directories to register together. Each entry runs through the
+   * same single-App pipeline as `register`; failures are captured per-entry
+   * rather than aborting the whole pack.
+   *
+   * Preconditions:
+   *  - `sourceRef` resolves to a directory that contains `w6w-pack.json`.
+   *  - Non-pack refs throw `RegistryError("invalid_query")` — call `register`
+   *    for those.
+   */
+  registerPack(sourceRef: string): Promise<PackRegisterResult>;
   /**
    * Re-resolve an already-registered app from its stored `sourceRef` and
    * re-register it. Unlike `register`, `refresh` doesn't take a source ref —
@@ -143,6 +177,17 @@ export function createRegistry(options: CreateRegistryOptions): Registry {
       throw new RegistryError("invalid_query", "`sourceRef` must be a non-empty string.");
     }
     const dir = await resolveSource(sourceRef);
+    return await registerFromDir(dir, sourceRef);
+  }
+
+  /**
+   * Shared "load + describe + digest + putVersion" pipeline. Used by both
+   * `register` (from a resolved sourceRef) and `registerPack` (from a
+   * per-entry directory inside a pack root). The `sourceRef` recorded on the
+   * stored AppVersion identifies where the App was loaded from — for a pack
+   * entry this is the entry's sub-path.
+   */
+  async function registerFromDir(dir: string, sourceRef: string): Promise<RegisterResult> {
     const app = await loadAppFn(dir);
     const described = describe(app);
     const manifest = transformManifest
@@ -176,6 +221,51 @@ export function createRegistry(options: CreateRegistryOptions): Registry {
       registered: result.registered,
       latestAdvanced: result.latestAdvanced,
     };
+  }
+
+  async function registerPack(sourceRef: string): Promise<PackRegisterResult> {
+    if (typeof sourceRef !== "string" || sourceRef.length === 0) {
+      throw new RegistryError("invalid_query", "`sourceRef` must be a non-empty string.");
+    }
+    const packDir = await resolveSource(sourceRef);
+    if (!(await isPackDir(packDir))) {
+      throw new RegistryError(
+        "invalid_query",
+        `pack: sourceRef "${sourceRef}" resolved to ${packDir}, which has no w6w-pack.json. Use register() for single-app refs.`,
+      );
+    }
+    const pack = await readPackManifest(packDir);
+
+    const results: PackEntryResult[] = [];
+    let registered = 0;
+    let failed = 0;
+
+    for (const entry of pack.apps) {
+      // `resolve` treats an absolute entry.path as-is and joins relative ones
+      // against packDir. Matches the shell's `cd $packDir && cd $path` semantics.
+      const entryDir = resolvePath(packDir, entry.path);
+      // Recorded sourceRef pins the entry sub-path so `refresh` re-resolves the
+      // exact same directory (independent of pack membership changes).
+      const entrySourceRef = `${sourceRef}#${entry.path}`;
+      try {
+        const result = await registerFromDir(entryDir, entrySourceRef);
+        assertEntryPinsMatch(entry, result);
+        results.push({ path: entry.path, ok: true, result });
+        registered++;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const code = err instanceof RegistryError ? err.code : "install_failed";
+        results.push({
+          path: entry.path,
+          ok: false,
+          error: { code, message },
+          ...(entry.optional ? { optional: true } : {}),
+        });
+        failed++;
+      }
+    }
+
+    return { pack, results, registered, failed };
   }
 
   async function refresh(id: string, opts: RefreshOptions = {}): Promise<RefreshResult> {
@@ -367,6 +457,7 @@ export function createRegistry(options: CreateRegistryOptions): Registry {
 
   return {
     register,
+    registerPack,
     refresh,
     get,
     getVersion,
@@ -378,6 +469,26 @@ export function createRegistry(options: CreateRegistryOptions): Registry {
     setVisibility,
     setSuccessor,
   };
+}
+
+/**
+ * Enforce a pack entry's optional `id` / `version` pins against the actual
+ * registered result. Thrown errors are caught by the registerPack loop and
+ * captured as a failed entry — the entry still counts against `failed`.
+ */
+function assertEntryPinsMatch(entry: PackAppEntry, result: RegisterResult): void {
+  if (entry.id && result.version.id !== entry.id) {
+    throw new RegistryError(
+      "manifest_id_mismatch",
+      `pack: entry "${entry.path}" declared id "${entry.id}" but loaded manifest id "${result.version.id}"`,
+    );
+  }
+  if (entry.version && result.version.version !== entry.version) {
+    throw new RegistryError(
+      "manifest_version_mismatch",
+      `pack: entry "${entry.path}" declared version "${entry.version}" but loaded manifest version "${result.version.version}"`,
+    );
+  }
 }
 
 // Surface this helper to consumers building their own data store who want the

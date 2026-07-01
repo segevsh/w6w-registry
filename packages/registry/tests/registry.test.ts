@@ -197,3 +197,118 @@ Deno.test("registry: refresh unknown app → RegistryError(unknown_app)", async 
     "is not registered",
   );
 });
+
+// ---------------------------------------------------------------------------
+// Pack support — registerPack against a temp dir containing w6w-pack.json.
+// ---------------------------------------------------------------------------
+
+const FIXTURES_ROOT = resolvePath(
+  fromFileUrl(import.meta.url),
+  "../../../../../core/fixtures/apps",
+);
+
+/**
+ * Build a temp pack dir that references the shipped fixtures. Returns the pack
+ * dir path plus a cleanup fn. The pack manifest itself references the fixture
+ * apps by relative path, so the fixture files don't need to be copied.
+ */
+async function makeTempPack(
+  entries: Array<{ path: string; version?: string; id?: string; optional?: boolean }>,
+  packName = "test-pack",
+): Promise<{ dir: string; cleanup: () => Promise<void> }> {
+  const dir = await Deno.makeTempDir({ prefix: "w6w-registry-pack-" });
+  const manifest = {
+    manifestVersion: "1",
+    kind: "pack",
+    name: packName,
+    version: "0.1.0",
+    apps: entries,
+  };
+  await Deno.writeTextFile(`${dir}/w6w-pack.json`, JSON.stringify(manifest, null, 2));
+  return { dir, cleanup: () => Deno.remove(dir, { recursive: true }) };
+}
+
+Deno.test("registry: registerPack installs every entry", async () => {
+  const pack = await makeTempPack([
+    { path: FIXTURES_ROOT + "/hello" },
+    { path: FIXTURES_ROOT + "/sendgrid" },
+  ]);
+  try {
+    const registry = makeRegistry();
+    const result = await registry.registerPack(pack.dir);
+    assertEquals(result.pack.name, "test-pack");
+    assertEquals(result.results.length, 2);
+    assertEquals(result.registered, 2);
+    assertEquals(result.failed, 0);
+    assert(result.results.every((r) => r.ok), "all entries should register");
+    const ids = new Set(
+      result.results.map((r) => (r.ok ? r.result.version.id : "")).filter(Boolean),
+    );
+    assert(ids.has("io.w6w.hello"));
+    assert(ids.has("io.w6w.sendgrid"));
+  } finally {
+    await pack.cleanup();
+  }
+});
+
+Deno.test("registry: registerPack captures per-entry failures without aborting the pack", async () => {
+  const pack = await makeTempPack([
+    { path: FIXTURES_ROOT + "/hello" },
+    { path: FIXTURES_ROOT + "/does-not-exist" },
+    { path: FIXTURES_ROOT + "/sendgrid" },
+  ]);
+  try {
+    const registry = makeRegistry();
+    const result = await registry.registerPack(pack.dir);
+    assertEquals(result.registered, 2);
+    assertEquals(result.failed, 1);
+    const failed = result.results.find((r) => !r.ok);
+    assert(failed && !failed.ok);
+    assertEquals(failed!.path, FIXTURES_ROOT + "/does-not-exist");
+  } finally {
+    await pack.cleanup();
+  }
+});
+
+Deno.test("registry: registerPack enforces entry id pin", async () => {
+  const pack = await makeTempPack([
+    { path: FIXTURES_ROOT + "/hello", id: "io.w6w.wrong-id" },
+  ]);
+  try {
+    const registry = makeRegistry();
+    const result = await registry.registerPack(pack.dir);
+    assertEquals(result.registered, 0);
+    assertEquals(result.failed, 1);
+    const failed = result.results[0];
+    assert(!failed.ok);
+    assertEquals(failed.error.code, "manifest_id_mismatch");
+  } finally {
+    await pack.cleanup();
+  }
+});
+
+Deno.test("registry: registerPack rejects a non-pack dir with invalid_query", async () => {
+  const registry = makeRegistry();
+  const err = await assertRejects(
+    () => registry.registerPack(FIXTURES_ROOT + "/hello"),
+    RegistryError,
+    "no w6w-pack.json",
+  );
+  assertEquals(err.code, "invalid_query");
+});
+
+Deno.test("registry: registerPack rejects a malformed manifest", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "w6w-registry-pack-bad-" });
+  try {
+    await Deno.writeTextFile(`${dir}/w6w-pack.json`, "{ not: json");
+    const registry = makeRegistry();
+    const err = await assertRejects(
+      () => registry.registerPack(dir),
+      RegistryError,
+      "malformed",
+    );
+    assertEquals(err.code, "invalid_query");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

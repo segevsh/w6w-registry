@@ -18,11 +18,15 @@
 export { createRegistry } from "./src/registry.ts";
 export type {
   CreateRegistryOptions,
+  PackEntryResult,
+  PackRegisterResult,
   RefreshOptions,
   RefreshResult,
   RegisterResult,
   Registry,
 } from "./src/registry.ts";
+
+export { isPackDir, readPackManifest } from "./src/pack.ts";
 
 export { canonicalJson, digestDescription } from "./src/digest.ts";
 
