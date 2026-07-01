@@ -3,7 +3,7 @@
  * and the lifecycle ops. Storage and source resolution are injected so this
  * module stays transport-free, storage-free, and easy to test.
  */
-import type { Maturity, Visibility } from "@w6w/types";
+import type { AppManifest, Maturity, Visibility } from "@w6w/types";
 import { describe, loadApp, type LoadedApp } from "@w6w/runtime";
 import { resolve as resolveSourceDefault } from "@w6w/sources";
 import {
@@ -19,6 +19,7 @@ import {
   RegistryError,
 } from "@w6w/registry-types";
 import { digestDescription } from "./digest.ts";
+import { type BumpKind, bumpSemver, semverGt } from "./semver.ts";
 
 export interface CreateRegistryOptions {
   /** The persistence backend. The only required dependency. */
@@ -38,6 +39,27 @@ export interface CreateRegistryOptions {
    * Tests can pass a frozen clock for deterministic snapshots.
    */
   now?: () => Date;
+  /**
+   * Optional transform applied to a loaded app's manifest at register time
+   * before the digest is computed and the version is persisted. Intended for
+   * hosts that want to make the stored manifest self-contained — e.g. read
+   * the icon/screenshot files referenced by relative paths in
+   * `appearance.icon` / `screenshots[]` and inline them as `data:` URIs so
+   * downstream UIs can render directly without re-resolving the source.
+   *
+   * The function receives the loaded app (so it can read from `loadedApp.dir`)
+   * and the manifest just returned by `describe()`. It returns a new manifest
+   * — typically a shallow merge with the inlined fields. The returned
+   * manifest is what gets stored and what the digest covers, so changing the
+   * icon file content does invalidate the digest (and re-registering bumps
+   * the version's content, as expected).
+   *
+   * Default: identity — paths are stored as-is.
+   */
+  transformManifest?: (input: {
+    loadedApp: LoadedApp;
+    manifest: AppManifest;
+  }) => Promise<AppManifest>;
 }
 
 export interface RegisterResult {
@@ -49,8 +71,47 @@ export interface RegisterResult {
   latestAdvanced: boolean;
 }
 
+export interface RefreshOptions {
+  /**
+   * How to resolve a same-version-different-content collision. When the
+   * re-loaded source's manifest carries the same `version` as the current
+   * latest but produces a different digest, the registry auto-bumps the
+   * *stored* version by this kind before writing (default: `"patch"`).
+   *
+   * The source's manifest itself is not modified — the bump only affects
+   * what gets persisted. If the source's manifest version is already
+   * strictly greater than the current latest, this option is ignored and
+   * the source's version is used verbatim.
+   */
+  versionBump?: BumpKind;
+}
+
+export interface RefreshResult extends RegisterResult {
+  /** True if the stored version was auto-bumped past the source's manifest version. */
+  bumped: boolean;
+  /** The source's manifest version, unchanged. Handy for logging / diffing against `version.version`. */
+  sourceVersion: string;
+}
+
 export interface Registry {
   register(sourceRef: string): Promise<RegisterResult>;
+  /**
+   * Re-resolve an already-registered app from its stored `sourceRef` and
+   * re-register it. Unlike `register`, `refresh` doesn't take a source ref —
+   * it uses whatever was recorded when the app was first added.
+   *
+   * Behavior:
+   *  - If the freshly-resolved digest matches the stored latest and versions
+   *    match: no-op (`registered: false, bumped: false`).
+   *  - If the source's manifest version is strictly greater than the stored
+   *    latest: written as a new version (like `register`).
+   *  - If the source's manifest version equals the stored latest but the
+   *    digest differs (typical for asset-only edits): the stored version is
+   *    auto-bumped by `opts.versionBump` (default `"patch"`) and written.
+   *  - If the source's manifest version is less than the stored latest:
+   *    throws `RegistryError("version_conflict")`.
+   */
+  refresh(id: string, opts?: RefreshOptions): Promise<RefreshResult>;
   get(id: string): Promise<RegisteredApp | undefined>;
   getVersion(id: string, version: string): Promise<AppVersion | undefined>;
   list(query?: ListQuery): Promise<Page<RegisteredApp>>;
@@ -75,6 +136,7 @@ export function createRegistry(options: CreateRegistryOptions): Registry {
   const resolveSource = options.resolveSource ?? resolveSourceDefault;
   const loadAppFn = options.loadAppFn ?? loadApp;
   const now = options.now ?? (() => new Date());
+  const transformManifest = options.transformManifest;
 
   async function register(sourceRef: string): Promise<RegisterResult> {
     if (typeof sourceRef !== "string" || sourceRef.length === 0) {
@@ -83,19 +145,22 @@ export function createRegistry(options: CreateRegistryOptions): Registry {
     const dir = await resolveSource(sourceRef);
     const app = await loadAppFn(dir);
     const described = describe(app);
+    const manifest = transformManifest
+      ? await transformManifest({ loadedApp: app, manifest: described.app })
+      : described.app;
     const digest = await digestDescription({
-      manifest: described.app,
+      manifest,
       actions: described.actions,
       auth: described.auth,
     });
 
     const version: AppVersion = {
-      id: described.app.id,
-      version: described.app.version,
+      id: manifest.id,
+      version: manifest.version,
       digest,
       sourceRef,
       origin: LOCAL_ORIGIN,
-      manifest: described.app,
+      manifest,
       actions: described.actions,
       auth: described.auth,
       registeredAt: now().toISOString(),
@@ -110,6 +175,91 @@ export function createRegistry(options: CreateRegistryOptions): Registry {
       version: result.version,
       registered: result.registered,
       latestAdvanced: result.latestAdvanced,
+    };
+  }
+
+  async function refresh(id: string, opts: RefreshOptions = {}): Promise<RefreshResult> {
+    const versionBump: BumpKind = opts.versionBump ?? "patch";
+
+    const existing = await store.getLatest(id);
+    if (!existing) {
+      throw new RegistryError("unknown_app", `App "${id}" is not registered.`);
+    }
+    const sourceRef = existing.latest.sourceRef;
+
+    const dir = await resolveSource(sourceRef);
+    const app = await loadAppFn(dir);
+    if (app.manifest.id !== id) {
+      throw new RegistryError(
+        "manifest_id_mismatch",
+        `Registered id "${id}" loaded a manifest with id "${app.manifest.id}".`,
+      );
+    }
+    const described = describe(app);
+    const sourceManifest = transformManifest
+      ? await transformManifest({ loadedApp: app, manifest: described.app })
+      : described.app;
+    const sourceVersion = sourceManifest.version;
+    const sourceDigest = await digestDescription({
+      manifest: sourceManifest,
+      actions: described.actions,
+      auth: described.auth,
+    });
+
+    // Nothing to do: same version + same content as what we already stored.
+    if (sourceVersion === existing.latest.version && sourceDigest === existing.latest.digest) {
+      return {
+        version: existing.latest,
+        registered: false,
+        latestAdvanced: false,
+        bumped: false,
+        sourceVersion,
+      };
+    }
+
+    let manifest = sourceManifest;
+    let digest = sourceDigest;
+    let bumped = false;
+
+    if (semverGt(sourceVersion, existing.latest.version)) {
+      // Source is already ahead — write it as-is.
+    } else if (sourceVersion === existing.latest.version) {
+      // Same version, different content → auto-bump past the current latest.
+      const nextVersion = bumpSemver(existing.latest.version, versionBump);
+      manifest = { ...sourceManifest, version: nextVersion };
+      digest = await digestDescription({
+        manifest,
+        actions: described.actions,
+        auth: described.auth,
+      });
+      bumped = true;
+    } else {
+      // Source went backwards — refuse.
+      throw new RegistryError(
+        "version_conflict",
+        `Source manifest version "${sourceVersion}" is less than the registered latest "${existing.latest.version}".`,
+      );
+    }
+
+    const version: AppVersion = {
+      id: manifest.id,
+      version: manifest.version,
+      digest,
+      sourceRef,
+      origin: LOCAL_ORIGIN,
+      manifest,
+      actions: described.actions,
+      auth: described.auth,
+      registeredAt: now().toISOString(),
+    };
+
+    const result = await store.putVersion({ version, promoteToLatestIfHigher: true });
+    return {
+      version: result.version,
+      registered: result.registered,
+      latestAdvanced: result.latestAdvanced,
+      bumped,
+      sourceVersion,
     };
   }
 
@@ -217,6 +367,7 @@ export function createRegistry(options: CreateRegistryOptions): Registry {
 
   return {
     register,
+    refresh,
     get,
     getVersion,
     list,

@@ -14,14 +14,14 @@ const result = await registry.register("file:./fixtures/apps/hello");
 await registry.register("file:./fixtures/apps/hello");
 // → { ..., registered: false }   ← idempotent, same content digest
 
-const app = await registry.get("com.w6w.hello");
+const app = await registry.get("io.w6w.hello");
 const { items } = await registry.list({ q: "hell" });
 
-const loaded = await registry.load("com.w6w.hello");
+const loaded = await registry.load("io.w6w.hello");
 //   → LoadedApp ready for @w6w/runtime.invoke / describe
 
-await registry.setMaturity("com.w6w.hello", "deprecated");
-await registry.setSuccessor("com.w6w.hello", "com.w6w.hello-next");
+await registry.setMaturity("io.w6w.hello", "deprecated");
+await registry.setSuccessor("io.w6w.hello", "io.w6w.hello-next");
 ```
 
 ## What this module does (and doesn't)

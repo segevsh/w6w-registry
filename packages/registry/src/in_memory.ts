@@ -20,6 +20,7 @@ import {
   type RegisteredApp,
   RegistryError,
 } from "@w6w/registry-types";
+import { semverGt } from "./semver.ts";
 
 interface AppRecord {
   /** Ordered by SemVer ascending (latest is the highest stored). */
@@ -186,37 +187,6 @@ export class InMemoryAppDataStore implements DataStore {
       updatedAt: rec.updatedAt,
     };
   }
-}
-
-/**
- * Tiny SemVer comparator — only handles the `MAJOR.MINOR.PATCH[-prerelease]`
- * shape the App manifest mandates. Non-numeric segments compare lexically.
- * Prerelease versions sort below their non-prerelease counterpart.
- */
-function semverGt(a: string, b: string): boolean {
-  if (a === b) return false;
-  const pa = parseSemver(a);
-  const pb = parseSemver(b);
-  for (let i = 0; i < 3; i++) {
-    if (pa.parts[i] !== pb.parts[i]) return pa.parts[i] > pb.parts[i];
-  }
-  // Equal core parts → a non-prerelease beats a prerelease; otherwise lex on prerelease.
-  if (!pa.pre && pb.pre) return true;
-  if (pa.pre && !pb.pre) return false;
-  if (pa.pre && pb.pre) return pa.pre > pb.pre;
-  return false;
-}
-
-function parseSemver(v: string): { parts: [number, number, number]; pre: string | null } {
-  const [core, pre] = v.split("-", 2);
-  const segs = core.split(".").map((s) => {
-    const n = Number(s);
-    return Number.isFinite(n) ? n : 0;
-  });
-  return {
-    parts: [segs[0] ?? 0, segs[1] ?? 0, segs[2] ?? 0],
-    pre: pre ?? null,
-  };
 }
 
 function encodeCursor(idx: number): string {

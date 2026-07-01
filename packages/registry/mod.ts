@@ -8,7 +8,7 @@
  * const registry = createRegistry({ store: new PostgresAppDataStore(db) });
  * await registry.register("file:./apps/hello");
  * const apps = await registry.list({});
- * const loaded = await registry.load("com.w6w.hello"); // ready for runtime.invoke
+ * const loaded = await registry.load("io.w6w.hello"); // ready for runtime.invoke
  * ```
  *
  * Takes a `DataStore` (from `@w6w/registry-types`) and returns a `Registry`
@@ -16,7 +16,13 @@
  * responsibility; this module owns the semantics.
  */
 export { createRegistry } from "./src/registry.ts";
-export type { CreateRegistryOptions, RegisterResult, Registry } from "./src/registry.ts";
+export type {
+  CreateRegistryOptions,
+  RefreshOptions,
+  RefreshResult,
+  RegisterResult,
+  Registry,
+} from "./src/registry.ts";
 
 export { canonicalJson, digestDescription } from "./src/digest.ts";
 
