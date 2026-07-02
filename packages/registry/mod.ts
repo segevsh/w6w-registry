@@ -22,6 +22,7 @@ export type {
   PackRegisterResult,
   RefreshOptions,
   RefreshResult,
+  RegisterPackOptions,
   RegisterResult,
   Registry,
 } from "./src/registry.ts";

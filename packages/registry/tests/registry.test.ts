@@ -297,6 +297,41 @@ Deno.test("registry: registerPack rejects a non-pack dir with invalid_query", as
   assertEquals(err.code, "invalid_query");
 });
 
+Deno.test("registry: registerPack honors opts.paths filter (subset install)", async () => {
+  const pack = await makeTempPack([
+    { path: FIXTURES_ROOT + "/hello" },
+    { path: FIXTURES_ROOT + "/sendgrid" },
+  ]);
+  try {
+    const registry = makeRegistry();
+    const result = await registry.registerPack(pack.dir, {
+      paths: [FIXTURES_ROOT + "/sendgrid"],
+    });
+    assertEquals(result.registered, 1);
+    assertEquals(result.failed, 0);
+    assertEquals(result.results.length, 1, "unmatched entries are silently skipped");
+    assert(result.results[0].ok);
+    assertEquals(result.results[0].path, FIXTURES_ROOT + "/sendgrid");
+    // The other id must NOT be in the store.
+    assertEquals(await registry.get("io.w6w.hello"), undefined);
+  } finally {
+    await pack.cleanup();
+  }
+});
+
+Deno.test("registry: registerPack with empty opts.paths installs nothing", async () => {
+  const pack = await makeTempPack([{ path: FIXTURES_ROOT + "/hello" }]);
+  try {
+    const registry = makeRegistry();
+    const result = await registry.registerPack(pack.dir, { paths: [] });
+    assertEquals(result.registered, 0);
+    assertEquals(result.failed, 0);
+    assertEquals(result.results.length, 0);
+  } finally {
+    await pack.cleanup();
+  }
+});
+
 Deno.test("registry: registerPack rejects a malformed manifest", async () => {
   const dir = await Deno.makeTempDir({ prefix: "w6w-registry-pack-bad-" });
   try {

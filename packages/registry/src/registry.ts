@@ -107,12 +107,28 @@ export type PackEntryResult =
 export interface PackRegisterResult {
   /** The pack manifest, as read from `w6w-pack.json`. */
   pack: PackManifest;
-  /** One entry per pack app, in manifest order. */
+  /**
+   * One entry per pack app that was *considered*. When `RegisterPackOptions.paths`
+   * is set, this only contains the entries that matched the filter. Manifest
+   * order is preserved.
+   */
   results: PackEntryResult[];
   /** Count of entries that successfully registered a new version (or were idempotent no-ops). */
   registered: number;
   /** Count of entries that failed. Optional-flagged failures still count here. */
   failed: number;
+}
+
+export interface RegisterPackOptions {
+  /**
+   * Optional whitelist of entry paths (as declared in `w6w-pack.json.apps[].path`)
+   * to install. When present, entries not in the set are silently skipped —
+   * they do not appear in `results` and do not affect `registered` / `failed`.
+   * Useful for a UI that lets a user pick a subset from a checkbox list.
+   *
+   * Paths must match the manifest entry's `path` field exactly.
+   */
+  paths?: string[];
 }
 
 export interface Registry {
@@ -127,8 +143,12 @@ export interface Registry {
    *  - `sourceRef` resolves to a directory that contains `w6w-pack.json`.
    *  - Non-pack refs throw `RegistryError("invalid_query")` — call `register`
    *    for those.
+   *
+   * `opts.paths`, when set, limits which entries are installed (a subset of
+   * the manifest's `apps[].path` values). Unmatched entries are silently
+   * skipped so a UI that lets a user check off entries can drive this directly.
    */
-  registerPack(sourceRef: string): Promise<PackRegisterResult>;
+  registerPack(sourceRef: string, opts?: RegisterPackOptions): Promise<PackRegisterResult>;
   /**
    * Re-resolve an already-registered app from its stored `sourceRef` and
    * re-register it. Unlike `register`, `refresh` doesn't take a source ref —
@@ -223,7 +243,10 @@ export function createRegistry(options: CreateRegistryOptions): Registry {
     };
   }
 
-  async function registerPack(sourceRef: string): Promise<PackRegisterResult> {
+  async function registerPack(
+    sourceRef: string,
+    opts: RegisterPackOptions = {},
+  ): Promise<PackRegisterResult> {
     if (typeof sourceRef !== "string" || sourceRef.length === 0) {
       throw new RegistryError("invalid_query", "`sourceRef` must be a non-empty string.");
     }
@@ -235,12 +258,14 @@ export function createRegistry(options: CreateRegistryOptions): Registry {
       );
     }
     const pack = await readPackManifest(packDir);
+    const pathFilter = opts.paths ? new Set(opts.paths) : null;
 
     const results: PackEntryResult[] = [];
     let registered = 0;
     let failed = 0;
 
     for (const entry of pack.apps) {
+      if (pathFilter && !pathFilter.has(entry.path)) continue;
       // `resolve` treats an absolute entry.path as-is and joins relative ones
       // against packDir. Matches the shell's `cd $packDir && cd $path` semantics.
       const entryDir = resolvePath(packDir, entry.path);
